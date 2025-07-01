@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "lib": [
+      "deno.ns"
+    ]
+  },
+  "lint": {
+    "files": {
+      "include": ["main.ts"]
+    }
+  },
+  "fmt": {
+    "files": {
+      "include": ["main.ts"]
+    }
+  }
+}
