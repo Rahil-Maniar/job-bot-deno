@@ -52,8 +52,8 @@ async function safeFetch(url: string, timeoutMs: number, options: RequestInit = 
 
 // --- HELPER: Fixed Gemini API Call ---
 async function callGeminiWithFallback(prompt: string, maxRetries: number = 3) {
-  const primaryModel = "gemini-2.0-flash-exp"; // Use more reliable model
-  const secondaryModel = "gemini-1.5-pro";
+  const primaryModel = "gemini-2.0-flash"; // Use more reliable model
+  const secondaryModel = "gemini-2.5-pro";
   const keysEnv = Deno.env.get("GEMINI_API_KEYS") || "";
   const keys = keysEnv.split(',').map(k => k.trim()).filter(Boolean);
   if (keys.length === 0) throw new Error("GEMINI_API_KEYS environment variable is not set.");
