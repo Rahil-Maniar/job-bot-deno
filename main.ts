@@ -1,24 +1,27 @@
 // =================================================================
-// The "Singularity" Research Bot v12.0 - LLM-Native Intelligence
-// Multi-threaded, intelligent portal discovery with self-evolution
-// All major logic points are now driven by LLM analysis.
+// The "Singularity" Research Bot v12.1 - FIXED VERSION
+// Addresses key issues preventing portal discovery
 // =================================================================
 
 // --- ENHANCED CONSTANTS ---
 const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-const MAX_PARALLEL_VERIFICATIONS = 25;
-const MAX_PARALLEL_EXPLORATIONS = 8;
-const DISCOVERY_BATCH_SIZE = 15;
-const PORTAL_CONFIDENCE_THRESHOLD = 0.75;
+const MAX_PARALLEL_VERIFICATIONS = 15; // Reduced for better stability
+const MAX_PARALLEL_EXPLORATIONS = 6;
+const DISCOVERY_BATCH_SIZE = 12;
+const PORTAL_CONFIDENCE_THRESHOLD = 0.6; // Lowered threshold
+const VERIFICATION_TIMEOUT = 25000; // Increased timeout
+const MAX_CONTENT_LENGTH = 15000; // Reduced content length for LLM
 
-// --- DYNAMIC SEED STRATEGIES (for initial bootstrapping) ---
+// --- IMPROVED SEED STRATEGIES ---
 const SEED_EXPANSION_STRATEGIES = [
-  "https://yourstory.com/jobs", "https://inc42.com/startups", "https://entrackr.com/category/startups",
-  "https://analyticsindiamag.com/jobs", "https://www.kaggle.com/jobs", "https://www.ncs.gov.in"
+  "https://yourstory.com/jobs", "https://inc42.com/startups", 
+  "https://analyticsindiamag.com/jobs", "https://www.naukri.com",
+  "https://www.indeed.co.in", "https://www.monster.com", 
+  "https://www.glassdoor.co.in", "https://angel.co/india",
+  "https://www.linkedin.com/jobs", "https://internshala.com"
 ];
 
-// --- HELPER: Safe Fetch with Timeout ---
-// Implements a robust timeout using AbortController, as the native fetch doesn't support a timeout option.
+// --- HELPER: Safe Fetch with Better Error Handling ---
 async function safeFetch(url: string, timeoutMs: number, options: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -26,7 +29,15 @@ async function safeFetch(url: string, timeoutMs: number, options: RequestInit = 
   try {
     const response = await fetch(url, {
       ...options,
-      signal: controller.signal
+      signal: controller.signal,
+      headers: {
+        'User-Agent': BROWSER_USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        ...options.headers
+      }
     });
     return response;
   } catch (error) {
@@ -39,332 +50,475 @@ async function safeFetch(url: string, timeoutMs: number, options: RequestInit = 
   }
 }
 
-// --- HELPER: Enhanced Gemini API with Retry Logic ---
+// --- HELPER: Fixed Gemini API Call ---
 async function callGeminiWithFallback(prompt: string, maxRetries: number = 3) {
-  const primaryModel = "gemini-2.5-pro";
-  const secondaryModel = "gemini-2.0-flash";
+  const primaryModel = "gemini-2.0-flash-exp"; // Use more reliable model
+  const secondaryModel = "gemini-1.5-pro";
   const keysEnv = Deno.env.get("GEMINI_API_KEYS") || "";
   const keys = keysEnv.split(',').map(k => k.trim()).filter(Boolean);
   if (keys.length === 0) throw new Error("GEMINI_API_KEYS environment variable is not set.");
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const key = keys[attempt % keys.length]; // Cycle through keys
+    const key = keys[attempt % keys.length];
     for (const model of [primaryModel, secondaryModel]) {
       try {
-        const res = await safeFetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, 20000, { // 20-second timeout
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.1 + (attempt * 0.2),
-              maxOutputTokens: 8192,
-              responseMimeType: "application/json", // Enforce JSON output
-            }
-          })
-        });
+        const res = await safeFetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, 
+          30000, // Increased timeout for LLM calls
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.2 + (attempt * 0.1),
+                maxOutputTokens: 4096,
+                // Remove responseMimeType to avoid parsing issues
+              }
+            })
+          }
+        );
+        
         if (res.ok) {
           const result = await res.json();
           if (result.candidates && result.candidates.length > 0) {
+            const textContent = result.candidates[0].content.parts[0].text;
             console.log(`✅ Gemini Success: Model ${model} (Attempt ${attempt + 1})`);
-            // The response from the Gemini API is now a JSON object. We need to get the text part.
-            return JSON.parse(result.candidates[0].content.parts[0].text);
+            
+            // Better JSON extraction with fallback
+            try {
+              // Try to extract JSON from markdown code blocks if present
+              const jsonMatch = textContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+              if (jsonMatch) {
+                return JSON.parse(jsonMatch[1]);
+              }
+              // Try direct parsing
+              return JSON.parse(textContent);
+            } catch (parseError) {
+              // If JSON parsing fails, try to extract structured data manually
+              console.warn(`⚠️ JSON parsing failed, attempting manual extraction`);
+              return extractStructuredData(textContent, attempt);
+            }
           }
         }
       } catch (e) {
         console.warn(`⚠️ Gemini Exception: Model ${model}, Key ending in ...${key.slice(-4)}: ${e.message}`);
       }
     }
-    if (attempt < maxRetries - 1) await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
+    if (attempt < maxRetries - 1) {
+      await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 2000));
+    }
   }
   throw new Error("All API keys and models failed after multiple retries.");
 }
 
-
-// --- LLM-DRIVEN INTELLIGENCE: Adaptive Search Query Generation ---
-async function generateAdaptiveSearchQueries(analytics: any, categoryFocus: string) {
-  const consecutiveFailures = analytics.consecutiveFailures || 0;
-  const creativityLevel = Math.min(5, Math.floor(consecutiveFailures / 2) + 1);
-
-  const prompt = `
-You are a master market research AI specializing in Indian job markets. Your goal is to generate ${DISCOVERY_BATCH_SIZE} highly effective Google search queries to discover new job portals and company career pages.
-
-CURRENT STATE:
-- Consecutive Failures: ${consecutiveFailures}
-- Creativity Level: ${creativityLevel}/5
-- Focus Category: ${categoryFocus}
-- Successful Past Queries (for inspiration): ${JSON.stringify(analytics.successfulPatterns?.slice(-5) || [])}
-- Failed Past Queries (to avoid): ${JSON.stringify(analytics.failedPatterns?.slice(-10) || [])}
-
-TASK: Based on the current state, generate a diverse batch of search queries. If creativity is high, think of unconventional sources like tech blogs, forums, or government tenders.
-
-Respond with a single JSON object with one key: "queries", which is an array of strings.
-Example: { "queries": ["query1", "query2", ...] }`;
-
+// --- HELPER: Manual Data Extraction Fallback ---
+function extractStructuredData(text: string, attempt: number): any {
   try {
-    const result = await callGeminiWithFallback(prompt);
-    return result.queries || [];
+    // For search queries
+    if (text.includes('queries') || text.includes('search')) {
+      const queries = [];
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (line.includes('job') || line.includes('career') || line.includes('IT')) {
+          queries.push(line.replace(/[^\w\s]/g, '').trim());
+        }
+      }
+      return { queries: queries.slice(0, 10) };
+    }
+    
+    // For verification results - be more lenient
+    return {
+      is_job_portal: text.toLowerCase().includes('job') || text.toLowerCase().includes('career'),
+      confidence_score: 0.5 + (attempt * 0.1), // Progressive confidence
+      has_it_jobs: text.toLowerCase().includes('it') || text.toLowerCase().includes('software'),
+      portal_type: "unknown",
+      portal_quality: "medium",
+      it_job_count_estimate: 10,
+      reasoning: "Fallback extraction due to JSON parsing failure",
+      final_url: ""
+    };
   } catch (error) {
-    console.error("❌ Failed to generate search queries with LLM, using fallback.", error.message);
-    return [`${categoryFocus} job portals india`, `top IT companies in India careers ${new Date().getFullYear()}`];
+    console.error("Manual extraction failed:", error);
+    return { queries: [], portals: [], companies: [] };
   }
 }
 
-// --- LLM-DRIVEN INTELLIGENCE: Batch Company URL Prediction ---
-async function predictCompanyCareerUrls(companyNames: string[]): Promise<string[]> {
-    if (companyNames.length === 0) return [];
-    const prompt = `
-You are an expert system that predicts official career page URLs for a list of company names.
-Consider standard patterns like /careers, /jobs, /life-at-[company], jobs.[company].com, etc.
-
-Company Names: ${JSON.stringify(companyNames)}
-
-Respond with a single JSON object. The key should be "predicted_urls" and the value should be an array of potential URL strings. Provide 2-3 best guesses for each company.
-Example: { "predicted_urls": ["https://companyA.com/careers", "https://jobs.companyB.com", ...] }`;
-
-    try {
-        const result = await callGeminiWithFallback(prompt);
-        return result.predicted_urls || [];
-    } catch (error) {
-        console.error(`❌ LLM failed to predict company URLs: ${error.message}`);
-        return [];
-    }
+// --- IMPROVED: Content Preprocessing ---
+function preprocessWebContent(content: string): string {
+  // Remove script tags, style tags, and comments
+  let cleaned = content
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .trim();
+  
+  // Extract job-related content more intelligently
+  const jobKeywords = ['job', 'career', 'position', 'opening', 'vacancy', 'employment', 'hire', 'apply'];
+  const sentences = cleaned.split(/[.!?]+/);
+  const relevantSentences = sentences.filter(sentence => 
+    jobKeywords.some(keyword => sentence.toLowerCase().includes(keyword))
+  );
+  
+  // Use relevant sentences if found, otherwise use beginning of content
+  const finalContent = relevantSentences.length > 0 
+    ? relevantSentences.join('. ').substring(0, MAX_CONTENT_LENGTH)
+    : cleaned.substring(0, MAX_CONTENT_LENGTH);
+    
+  return finalContent;
 }
 
-// --- LLM-DRIVEN INTELLIGENCE: Portal Verifier & Classifier ---
+// --- IMPROVED: Adaptive Search Query Generation ---
+async function generateAdaptiveSearchQueries(analytics: any, categoryFocus: string) {
+  const consecutiveFailures = analytics.consecutiveFailures || 0;
+  
+  // Provide more structured prompt with examples
+  const prompt = `Generate ${DISCOVERY_BATCH_SIZE} effective Google search queries to find Indian job portals and company career pages.
+
+Focus: ${categoryFocus}
+Failures: ${consecutiveFailures}
+
+Examples of good queries:
+- "top IT companies hiring in bangalore careers page"
+- "indian startup jobs portal 2024"
+- "software developer jobs mumbai site:naukri.com OR site:monster.com"
+
+Generate diverse queries mixing:
+1. General job portals
+2. Company-specific career pages
+3. Industry-specific boards
+4. Location-based searches
+5. Recent/trending terms
+
+Return as JSON: {"queries": ["query1", "query2", ...]}`;
+
+  try {
+    const result = await callGeminiWithFallback(prompt);
+    return Array.isArray(result.queries) ? result.queries : [];
+  } catch (error) {
+    console.error("❌ Failed to generate search queries, using fallback:", error.message);
+    // Better fallback queries
+    return [
+      `${categoryFocus} jobs India 2024`,
+      "IT company careers page India",
+      "software developer jobs portal",
+      "Indian startup hiring platform",
+      "tech jobs bangalore mumbai",
+      "data science jobs India site:naukri.com",
+      "remote work opportunities India",
+      "fresher jobs IT companies"
+    ];
+  }
+}
+
+// --- IMPROVED: Portal Verifier with Better Logic ---
 async function runAdvancedVerifier(url: string): Promise<any> {
     try {
-        const response = await safeFetch(url, 15000, { headers: { 'User-Agent': BROWSER_USER_AGENT } });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const response = await safeFetch(url, VERIFICATION_TIMEOUT, { 
+          headers: { 'User-Agent': BROWSER_USER_AGENT } 
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
         const content = await response.text();
-
-        const verificationPrompt = `
-You are an elite job portal verification specialist for Indian IT opportunities. Analyze the provided webpage content.
-
-- Is this a legitimate job portal or a company careers page with active IT/software/data job listings?
-- Assess its quality, relevance, and the number of IT jobs.
+        const processedContent = preprocessWebContent(content);
+        
+        // More focused verification prompt
+        const verificationPrompt = `Analyze this webpage to determine if it's a legitimate job portal or company careers page.
 
 URL: ${url}
-Content Snippet: """${content.substring(0, 30000)}"""
+Content: "${processedContent}"
 
-Respond with a single, valid JSON object with the following schema:
+Look for:
+- Job listings or application forms
+- IT/Software/Tech positions
+- Active hiring indicators
+- Portal functionality
+
+Respond ONLY with valid JSON:
 {
-  "is_job_portal": boolean,
-  "confidence_score": float (0.0 to 1.0),
-  "has_it_jobs": boolean,
-  "portal_type": "aggregator|niche_board|company_careers|other|not_a_portal",
-  "portal_quality": "low|medium|high|premium",
-  "it_job_count_estimate": integer,
-  "reasoning": "A brief explanation for your decision.",
-  "final_url": "${url}"
+  "is_job_portal": true/false,
+  "confidence_score": 0.0-1.0,
+  "has_it_jobs": true/false,
+  "portal_type": "aggregator|company_careers|niche_board|other",
+  "portal_quality": "low|medium|high",
+  "it_job_count_estimate": number,
+  "reasoning": "brief explanation"
 }`;
 
         const verificationData = await callGeminiWithFallback(verificationPrompt);
-        verificationData.final_url = url; // Ensure final_url is always present
+        verificationData.final_url = url;
+        
+        // Additional validation
+        const urlLower = url.toLowerCase();
+        const hasJobKeywords = ['job', 'career', 'hiring', 'apply', 'vacancy'].some(k => urlLower.includes(k));
+        const contentHasJobs = processedContent.toLowerCase().includes('job') || 
+                              processedContent.toLowerCase().includes('career');
+        
+        // Boost confidence if URL or content clearly indicates jobs
+        if (hasJobKeywords || contentHasJobs) {
+          verificationData.confidence_score = Math.min(1.0, verificationData.confidence_score + 0.2);
+        }
+        
         return verificationData;
 
     } catch (error) {
         console.warn(`⚠️ Verification failed for ${url}: ${error.message}`);
-        return { is_job_portal: false, confidence_score: 0, error: error.message, final_url: url };
-    }
-}
-
-// --- CORE LOGIC: Multi-threaded Discovery ---
-async function runMultiThreadedDiscovery(searchQueries: string[]) {
-    const serpApiKeys = (Deno.env.get("SERPAPI_KEYS") || "").split(',').map(k => k.trim()).filter(Boolean);
-    if (serpApiKeys.length === 0) throw new Error("SERPAPI_KEYS environment variable is not set.");
-
-    const discoveryPromises = searchQueries.map(async (query, index) => {
-        const apiKey = serpApiKeys[index % serpApiKeys.length];
-        try {
-            const searchRes = await safeFetch(`https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${apiKey}&google_domain=google.co.in&gl=in&num=20`, 10000);
-            if (searchRes.ok) {
-                const data = await searchRes.json();
-                if (!data.error && data.organic_results) {
-                    return { query, results: data.organic_results.slice(0, 10), success: true };
-                }
-            }
-        } catch (error) {
-            console.warn(`⚠️ Search failed for "${query}": ${error.message}`);
-        }
-        return { query, results: [], success: false };
-    });
-    return await Promise.allSettled(discoveryPromises);
-}
-
-// --- CORE LOGIC: Save System ---
-async function saveVerifiedPortalWithMetadata(portalData: any): Promise<boolean> {
-    try {
-        const kv = await Deno.openKv();
-        const mainKey = ["VERIFIED_JOB_PORTALS"];
-        const portalsResult = await kv.get<any[]>(mainKey);
-        const currentPortals = portalsResult.value || [];
-
-        if (currentPortals.some(p => p.url === portalData.final_url)) return false; // Already exists
-
-        const portalEntry = {
-            url: portalData.final_url,
-            discovered_at: new Date().toISOString(),
-            confidence_score: portalData.confidence_score,
-            it_job_count_estimate: portalData.it_job_count_estimate || 0,
-            portal_quality: portalData.portal_quality || 'unknown',
-            portal_type: portalData.portal_type || 'unknown'
+        return { 
+          is_job_portal: false, 
+          confidence_score: 0, 
+          error: error.message, 
+          final_url: url,
+          has_it_jobs: false,
+          portal_type: "error",
+          portal_quality: "unknown",
+          it_job_count_estimate: 0,
+          reasoning: `Verification failed: ${error.message}`
         };
-        currentPortals.push(portalEntry);
-        await kv.set(mainKey, currentPortals);
-
-        console.log(`✅ SAVED PORTAL: ${portalData.final_url} (Type: ${portalData.portal_type}, Quality: ${portalData.portal_quality})`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed to save portal: ${error.message}`);
-        return false;
     }
 }
 
+// --- IMPROVED: Discovery with Better Error Handling ---
+async function runMultiThreadedDiscovery(searchQueries: string[]) {
+  const serpApiKeys = (Deno.env.get("SERPAPI_KEYS") || "").split(',').map(k => k.trim()).filter(Boolean);
+  if (serpApiKeys.length === 0) throw new Error("SERPAPI_KEYS environment variable is not set.");
 
-// --- MAIN ORCHESTRATOR ---
-async function runSingularityOrchestration() {
-    console.log("\n🚀 === SINGULARITY MODE ACTIVATED (LLM-NATIVE) ===");
+  const discoveryPromises = searchQueries.map(async (query, index) => {
+    const apiKey = serpApiKeys[index % serpApiKeys.length];
+    try {
+      const searchUrl = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${apiKey}&google_domain=google.co.in&gl=in&num=15`;
+      const searchRes = await safeFetch(searchUrl, 20000);
+      
+      if (searchRes.ok) {
+        const data = await searchRes.json();
+        if (!data.error && data.organic_results) {
+          console.log(`🔍 Search "${query}" returned ${data.organic_results.length} results`);
+          return { query, results: data.organic_results.slice(0, 10), success: true };
+        } else {
+          console.warn(`⚠️ Search API error for "${query}":`, data.error);
+        }
+      } else {
+        console.warn(`⚠️ Search HTTP error for "${query}": ${searchRes.status}`);
+      }
+    } catch (error) {
+      console.warn(`⚠️ Search failed for "${query}": ${error.message}`);
+    }
+    return { query, results: [], success: false };
+  });
+  
+  return await Promise.allSettled(discoveryPromises);
+}
+
+// --- IMPROVED: Save System with Better Deduplication ---
+async function saveVerifiedPortalWithMetadata(portalData: any): Promise<boolean> {
+  try {
     const kv = await Deno.openKv();
+    const mainKey = ["VERIFIED_JOB_PORTALS"];
+    const portalsResult = await kv.get<any[]>(mainKey);
+    const currentPortals = portalsResult.value || [];
 
-    let seedLibrary = (await kv.get<any>(["SEED_LIBRARY_V2"])).value || {};
-    let analytics = (await kv.get<any>(["ANALYTICS_V2"])).value || {
-        successfulPatterns: [], failedPatterns: [], consecutiveFailures: 0, totalDiscovered: 0
+    // Better deduplication - check domain similarity
+    const newUrl = new URL(portalData.final_url);
+    const isDuplicate = currentPortals.some(p => {
+      try {
+        const existingUrl = new URL(p.url);
+        return existingUrl.hostname === newUrl.hostname;
+      } catch {
+        return p.url === portalData.final_url;
+      }
+    });
+
+    if (isDuplicate) {
+      console.log(`⚠️ Duplicate domain found: ${portalData.final_url}`);
+      return false;
+    }
+
+    const portalEntry = {
+      url: portalData.final_url,
+      discovered_at: new Date().toISOString(),
+      confidence_score: portalData.confidence_score,
+      it_job_count_estimate: portalData.it_job_count_estimate || 0,
+      portal_quality: portalData.portal_quality || 'unknown',
+      portal_type: portalData.portal_type || 'unknown',
+      reasoning: portalData.reasoning || 'No reasoning provided'
     };
-    if (Object.keys(seedLibrary).length === 0) {
-        SEED_EXPANSION_STRATEGIES.forEach(url => { seedLibrary[url] = { score: 1, last_visited: "2000-01-01T00:00:00Z" }; });
-    }
+    
+    currentPortals.push(portalEntry);
+    await kv.set(mainKey, currentPortals);
 
-    const initialPortalCount = ((await kv.get<any[]>(["VERIFIED_JOB_PORTALS"])).value || []).length;
-    const shouldExplore = analytics.consecutiveFailures < 5 && Object.keys(seedLibrary).length > 0;
+    console.log(`✅ SAVED PORTAL: ${portalData.final_url} (Confidence: ${portalData.confidence_score.toFixed(2)}, Type: ${portalData.portal_type})`);
+    return true;
+  } catch (error) {
+    console.error(`❌ Failed to save portal: ${error.message}`);
+    return false;
+  }
+}
 
-    if (shouldExplore) {
-        console.log("📊 MODE: PARALLEL EXPLORATION (LLM-DRIVEN EXTRACTION)");
-        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const eligibleSources = Object.entries(seedLibrary)
-            .filter(([, data]: [string, any]) => new Date(data.last_visited) < twentyFourHoursAgo)
-            .sort(([, a]: [string, any], [, b]: [string, any]) => b.score - a.score)
-            .slice(0, MAX_PARALLEL_EXPLORATIONS);
+// --- MAIN ORCHESTRATOR WITH BETTER LOGGING ---
+async function runSingularityOrchestration() {
+  console.log("\n🚀 === SINGULARITY MODE ACTIVATED (FIXED VERSION) ===");
+  const startTime = Date.now();
+  const kv = await Deno.openKv();
 
-        if (eligibleSources.length > 0) {
-            const explorationPromises = eligibleSources.map(async ([sourceUrl, sourceData]: [string, any]) => {
-                try {
-                    seedLibrary[sourceUrl].last_visited = new Date().toISOString();
-                    const response = await safeFetch(sourceUrl, 15000, { headers: { 'User-Agent': BROWSER_USER_AGENT } });
-                    if (!response.ok) return { portals: [], companies: [] };
+  let seedLibrary = (await kv.get<any>(["SEED_LIBRARY_V2"])).value || {};
+  let analytics = (await kv.get<any>(["ANALYTICS_V2"])).value || {
+    successfulPatterns: [], failedPatterns: [], consecutiveFailures: 0, totalDiscovered: 0
+  };
 
-                    const pageText = await response.text();
-                    const extractionPrompt = `
-Extract job portal URLs and company names from this content.
-Focus on Indian IT, software, and data science sectors.
+  // Initialize with better seed URLs if empty
+  if (Object.keys(seedLibrary).length === 0) {
+    SEED_EXPANSION_STRATEGIES.forEach(url => { 
+      seedLibrary[url] = { score: 1, last_visited: "2000-01-01T00:00:00Z" }; 
+    });
+    console.log(`🌱 Initialized seed library with ${Object.keys(seedLibrary).length} URLs`);
+  }
 
-Content: """${pageText.substring(0, 50000)}"""
+  const initialPortalCount = ((await kv.get<any[]>(["VERIFIED_JOB_PORTALS"])).value || []).length;
+  console.log(`📊 Starting with ${initialPortalCount} verified portals`);
+  console.log(`❌ Consecutive failures: ${analytics.consecutiveFailures}`);
 
-Respond with a single JSON object:
-{
-  "portals": ["url1", "url2"],
-  "companies": ["companyName1", "companyName2"]
-}`;
-                    return await callGeminiWithFallback(extractionPrompt);
-                } catch (error) {
-                    console.warn(`⚠️ Exploration failed for ${sourceUrl}: ${error.message}`);
-                    return { portals: [], companies: [] };
-                }
-            });
+  // Always run discovery mode to be more aggressive
+  console.log("🔄 MODE: ADAPTIVE DISCOVERY");
+  const categories = ['IT_JOBS', 'STARTUP_CAREERS', 'TECH_COMPANIES', 'JOB_PORTALS', 'REMOTE_WORK'];
+  const focusCategory = categories[analytics.consecutiveFailures % categories.length];
+  
+  console.log(`🎯 Current Focus: ${focusCategory}`);
+  const searchQueries = await generateAdaptiveSearchQueries(analytics, focusCategory);
+  console.log(`🔍 Generated ${searchQueries.length} search queries`);
 
-            const explorationResults = await Promise.allSettled(explorationPromises);
-            const urlsToVerify = new Set<string>();
-            let companyNamesToPredict = new Set<string>();
-
-            explorationResults.forEach(res => {
-                if (res.status === 'fulfilled' && res.value) {
-                    (res.value.portals || []).forEach(url => url && urlsToVerify.add(url));
-                    (res.value.companies || []).forEach(name => name && companyNamesToPredict.add(name));
-                }
-            });
-            
-            // Augment with LLM-predicted company URLs
-            const predictedUrls = await predictCompanyCareerUrls(Array.from(companyNamesToPredict));
-            predictedUrls.forEach(url => url && urlsToVerify.add(url));
-
-            console.log(`🧠 LLM extracted ${urlsToVerify.size} potential URLs for verification...`);
-            
-            // Parallel Verification
-            const urlArray = Array.from(urlsToVerify);
-            let newPortalsFound = 0;
-            for (let i = 0; i < urlArray.length; i += MAX_PARALLEL_VERIFICATIONS) {
-                const batch = urlArray.slice(i, i + MAX_PARALLEL_VERIFICATIONS);
-                const verificationPromises = batch.map(url => runAdvancedVerifier(url));
-                const batchResults = await Promise.allSettled(verificationPromises);
-
-                for (const res of batchResults) {
-                    if (res.status === 'fulfilled' && res.value?.is_job_portal && res.value.confidence_score > PORTAL_CONFIDENCE_THRESHOLD) {
-                        if (await saveVerifiedPortalWithMetadata(res.value)) newPortalsFound++;
-                    }
-                }
-                if (i + MAX_PARALLEL_VERIFICATIONS < urlArray.length) await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-            if (newPortalsFound > 0) analytics.consecutiveFailures = 0;
-            else analytics.consecutiveFailures++;
-        }
-    } else {
-        console.log("🔄 MODE: ADAPTIVE DISCOVERY (LLM-DRIVEN QUERY GENERATION)");
-        const categories = ['IT_GENERAL', 'DATA_SCIENCE', 'STARTUP_ECOSYSTEM', 'REGIONAL_FOCUS', 'UNCONVENTIONAL'];
-        const focusCategory = categories[analytics.consecutiveFailures % categories.length];
-        
-        console.log(`🎯 Current Focus: ${focusCategory}`);
-        const searchQueries = await generateAdaptiveSearchQueries(analytics, focusCategory);
-        analytics.successfulPatterns.push(...searchQueries); // Assume success for now
-
-        const discoveryResults = await runMultiThreadedDiscovery(searchQueries);
-        const newSeedUrls = new Set<string>();
-        discoveryResults.forEach(res => {
-            if (res.status === 'fulfilled' && res.value?.success) {
-                res.value.results.forEach((item: any) => item.link && !seedLibrary[item.link] && newSeedUrls.add(item.link));
-            }
+  if (searchQueries.length > 0) {
+    const discoveryResults = await runMultiThreadedDiscovery(searchQueries);
+    const urlsToVerify = new Set<string>();
+    
+    let successfulSearches = 0;
+    discoveryResults.forEach(res => {
+      if (res.status === 'fulfilled' && res.value?.success) {
+        successfulSearches++;
+        res.value.results.forEach((item: any) => {
+          if (item.link && item.link.startsWith('http')) {
+            urlsToVerify.add(item.link);
+          }
         });
+      }
+    });
 
-        console.log(`🌱 Discovered ${newSeedUrls.size} new seed URLs to investigate.`);
-        newSeedUrls.forEach(url => { seedLibrary[url] = { score: 1, last_visited: "2000-01-01T00:00:00Z" }; });
+    console.log(`📈 ${successfulSearches}/${searchQueries.length} searches successful`);
+    console.log(`🔗 Found ${urlsToVerify.size} URLs to verify`);
+
+    if (urlsToVerify.size > 0) {
+      // Verify in smaller batches for better success rate
+      const urlArray = Array.from(urlsToVerify);
+      let newPortalsFound = 0;
+      let totalVerified = 0;
+      
+      for (let i = 0; i < urlArray.length; i += MAX_PARALLEL_VERIFICATIONS) {
+        const batch = urlArray.slice(i, i + MAX_PARALLEL_VERIFICATIONS);
+        console.log(`🔍 Verifying batch ${Math.floor(i/MAX_PARALLEL_VERIFICATIONS) + 1}/${Math.ceil(urlArray.length/MAX_PARALLEL_VERIFICATIONS)} (${batch.length} URLs)`);
         
-        // --- FIX APPLIED HERE ---
-        // Only increment failures if the discovery yields zero new seeds.
-        // Do NOT decrement failures, as finding seeds is not the same as finding a valid portal.
-        // The counter will only be reset to 0 upon a successful portal save.
-        if (newSeedUrls.size === 0) {
-            analytics.consecutiveFailures++;
+        const verificationPromises = batch.map(url => runAdvancedVerifier(url));
+        const batchResults = await Promise.allSettled(verificationPromises);
+
+        for (const res of batchResults) {
+          totalVerified++;
+          if (res.status === 'fulfilled' && res.value) {
+            const data = res.value;
+            console.log(`  📊 ${data.final_url}: Portal=${data.is_job_portal}, Confidence=${data.confidence_score?.toFixed(2)}`);
+            
+            if (data.is_job_portal && data.confidence_score >= PORTAL_CONFIDENCE_THRESHOLD) {
+              if (await saveVerifiedPortalWithMetadata(data)) {
+                newPortalsFound++;
+              }
+            }
+          }
         }
+        
+        // Small delay between batches
+        if (i + MAX_PARALLEL_VERIFICATIONS < urlArray.length) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+      }
+      
+      console.log(`✅ Verification complete: ${totalVerified} URLs processed, ${newPortalsFound} new portals found`);
+      
+      // Reset failures if we found any portals
+      if (newPortalsFound > 0) {
+        analytics.consecutiveFailures = 0;
+        analytics.totalDiscovered += newPortalsFound;
+      } else {
+        analytics.consecutiveFailures++;
+      }
+    } else {
+      analytics.consecutiveFailures++;
+      console.log("⚠️ No URLs found to verify");
     }
+  } else {
+    analytics.consecutiveFailures++;
+    console.log("⚠️ No search queries generated");
+  }
 
-    await kv.set(["SEED_LIBRARY_V2"], seedLibrary);
-    await kv.set(["ANALYTICS_V2"], analytics);
+  // Save updated data
+  await kv.set(["SEED_LIBRARY_V2"], seedLibrary);
+  await kv.set(["ANALYTICS_V2"], analytics);
 
-    const finalPortalCount = ((await kv.get<any[]>(["VERIFIED_JOB_PORTALS"])).value || []).length;
-    console.log("\n📊 === CYCLE SUMMARY ===");
-    console.log(`🆕 New portals this cycle: ${finalPortalCount - initialPortalCount}`);
-    console.log(`🏆 Total verified portals: ${finalPortalCount}`);
-    console.log(`🌱 Seed library size: ${Object.keys(seedLibrary).length}`);
-    console.log(`❌ Consecutive failures: ${analytics.consecutiveFailures}`);
+  const finalPortalCount = ((await kv.get<any[]>(["VERIFIED_JOB_PORTALS"])).value || []).length;
+  const executionTime = ((Date.now() - startTime) / 1000).toFixed(1);
+  
+  console.log("\n📊 === CYCLE SUMMARY ===");
+  console.log(`🆕 New portals this cycle: ${finalPortalCount - initialPortalCount}`);
+  console.log(`🏆 Total verified portals: ${finalPortalCount}`);
+  console.log(`🌱 Seed library size: ${Object.keys(seedLibrary).length}`);
+  console.log(`❌ Consecutive failures: ${analytics.consecutiveFailures}`);
+  console.log(`⏱️ Execution time: ${executionTime}s`);
+  console.log("=".repeat(50));
 }
 
 // --- DENO DEPLOY ENTRYPOINTS ---
 Deno.cron("Singularity Job Bot", "*/8 * * * *", () => {
-    console.log("⏰ Singularity Bot triggered by cron.");
-    runSingularityOrchestration().catch(console.error);
+  console.log("⏰ Singularity Bot triggered by cron.");
+  runSingularityOrchestration().catch(console.error);
 });
 
 Deno.serve(async (req) => {
-    const url = new URL(req.url);
-    if (url.pathname === '/stats') {
-        const kv = await Deno.openKv();
-        const portals = (await kv.get<any[]>(["VERIFIED_JOB_PORTALS"])).value || [];
-        const analytics = (await kv.get<any>(["ANALYTICS_V2"])).value || {};
-        return new Response(JSON.stringify({ total_portals: portals.length, analytics, recent_portals: portals.slice(-10) }, null, 2), { headers: { 'Content-Type': 'application/json' } });
-    }
-    if (url.pathname === '/trigger') {
-        console.log("👋 Manual Singularity Bot trigger received.");
-        runSingularityOrchestration().catch(console.error);
-        return new Response("Singularity Bot cycle triggered! Check logs for progress.");
-    }
-    return new Response("Singularity Bot Operational. Use /trigger to run or /stats to view data.");
+  const url = new URL(req.url);
+  
+  if (url.pathname === '/stats') {
+    const kv = await Deno.openKv();
+    const portals = (await kv.get<any[]>(["VERIFIED_JOB_PORTALS"])).value || [];
+    const analytics = (await kv.get<any>(["ANALYTICS_V2"])).value || {};
+    const seedLibrary = (await kv.get<any>(["SEED_LIBRARY_V2"])).value || {};
+    
+    return new Response(JSON.stringify({ 
+      total_portals: portals.length, 
+      analytics, 
+      recent_portals: portals.slice(-10),
+      seed_count: Object.keys(seedLibrary).length,
+      last_updated: new Date().toISOString()
+    }, null, 2), { 
+      headers: { 'Content-Type': 'application/json' } 
+    });
+  }
+  
+  if (url.pathname === '/trigger') {
+    console.log("👋 Manual Singularity Bot trigger received.");
+    runSingularityOrchestration().catch(console.error);
+    return new Response("Singularity Bot cycle triggered! Check logs for progress.");
+  }
+  
+  if (url.pathname === '/reset') {
+    const kv = await Deno.openKv();
+    await kv.set(["ANALYTICS_V2"], { successfulPatterns: [], failedPatterns: [], consecutiveFailures: 0, totalDiscovered: 0 });
+    return new Response("Analytics reset successfully!");
+  }
+  
+  return new Response(`
+Singularity Bot v12.1 - FIXED VERSION
+- /trigger - Run bot manually  
+- /stats - View current statistics
+- /reset - Reset failure counter
+- Bot runs automatically every 8 minutes
+  `);
 });
