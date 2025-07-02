@@ -327,8 +327,13 @@ Respond with a single JSON object:
         console.log(`🌱 Discovered ${newSeedUrls.size} new seed URLs to investigate.`);
         newSeedUrls.forEach(url => { seedLibrary[url] = { score: 1, last_visited: "2000-01-01T00:00:00Z" }; });
         
-        if (newSeedUrls.size > 0) analytics.consecutiveFailures = Math.max(0, analytics.consecutiveFailures - 1);
-        else analytics.consecutiveFailures++;
+        // --- FIX APPLIED HERE ---
+        // Only increment failures if the discovery yields zero new seeds.
+        // Do NOT decrement failures, as finding seeds is not the same as finding a valid portal.
+        // The counter will only be reset to 0 upon a successful portal save.
+        if (newSeedUrls.size === 0) {
+            analytics.consecutiveFailures++;
+        }
     }
 
     await kv.set(["SEED_LIBRARY_V2"], seedLibrary);
